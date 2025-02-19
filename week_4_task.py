@@ -33,7 +33,7 @@ def random_position_cylinder(radius, height):
 # Function to simulate neutron trajectories
 def simulate_neutron_trajectories(boundary, size, n_neutrons=50, mean_free_path=1):
     trajectories = []
-    
+    exited_neutrons = 0
     for _ in range(n_neutrons):
         # Choose initial position
         if boundary == "sphere":
@@ -53,16 +53,26 @@ def simulate_neutron_trajectories(boundary, size, n_neutrons=50, mean_free_path=
             
             # Check if neutron has exited
             if boundary == "sphere" and np.linalg.norm(new_position) > size:
+                exited_neutrons += 1
                 break
             elif boundary == "cylinder" and (new_position[2] > size[1]/2 or new_position[2] < -size[1]/2 or new_position[0]**2 + new_position[1]**2 > size[0]**2):
+                exited_neutrons += 1
                 break
             
             path.append(new_position)
             position = new_position  # Update position
             
         trajectories.append(np.array(path))  # Store path
-        
+    
+    # Validation check
+    if exited_neutrons == n_neutrons:
+        print(f"All neutrons ({exited_neutrons} neutrons) successfully exited the boundary. Simulation is correct.")
+    else:
+        print(f"Error: {n_neutrons - exited_neutrons} neutrons did not exit the boundary!")
+
+    
     return trajectories
+
 
 # Function to plot neutron trajectories
 def plot_trajectories(trajectories, boundary, size):
@@ -96,7 +106,68 @@ def plot_trajectories(trajectories, boundary, size):
     ax.set_zlabel("Z")
     ax.set_title("Neutron Trajectories")
 
+# Function to simulate neutron trajectories and record step lengths
+def simulate_neutron_trajectories_with_lengths(boundary, size, n_neutrons=50, mean_free_path=1):
+    step_lengths = []  # List to store free path lengths
     
+    trajectories = []
+    
+    for _ in range(n_neutrons):
+        # Choose initial position
+        if boundary == "sphere":
+            position = random_position_sphere(size)
+        elif boundary == "cylinder":
+            position = random_position_cylinder(size[0], size[1])
+        else:
+            raise ValueError("Boundary must be 'sphere' or 'cylinder'")
+        
+        path = [position]  # Store trajectory
+        
+        while True:
+            direction = random_unit_vector()
+            d = np.random.exponential(mean_free_path)  # Sample free path
+            step_lengths.append(d)  # Record the free path length
+            
+            new_position = position + d * direction  # Move neutron
+            
+            # Check if neutron has exited
+            if boundary == "sphere" and np.linalg.norm(new_position) > size:
+                break
+            elif boundary == "cylinder" and (new_position[2] > size[1]/2 or new_position[2] < -size[1]/2 or new_position[0]**2 + new_position[1]**2 > size[0]**2):
+                break
+            
+            path.append(new_position)
+            position = new_position  # Update position
+            
+        trajectories.append(np.array(path))  # Store path
+        
+    return trajectories, step_lengths
+
+# Function to plot histogram of free path lengths
+def plot_free_path_lengths_histogram(step_lengths, mean_free_path=1):
+    plt.figure(figsize=(8, 6))
+    plt.hist(step_lengths, bins=100, density=True, alpha=0.6, color='b', label="Simulated Path Lengths")
+    
+    # Plot the expected exponential distribution
+    x = np.linspace(0, max(step_lengths), 1000)
+    y = (1 / mean_free_path) * np.exp(-x / mean_free_path)
+    plt.plot(x, y, 'r-', label="Exponential Distribution (Theory)")
+    
+    plt.xlabel("Step Length")
+    plt.ylabel("Probability Density")
+    plt.title("Histogram of Neutron Step Lengths")
+    plt.legend()
+    plt.show()
+
+
+
+
+boundary_type = "cylinder"  # Change to "cylinder" to switch
+size = 5 if boundary_type == "sphere" else (5, 10)  # Radius for sphere, (radius, height) for cylinder
+
+trajectories, step_lengths = simulate_neutron_trajectories_with_lengths(boundary_type, size, 10000)
+plot_free_path_lengths_histogram(step_lengths, mean_free_path=1)
+   
 
 # Example usage
 
@@ -104,5 +175,5 @@ boundary_type = "cylinder"  # Change to "cylinder" to switch
 size = 5 if boundary_type == "sphere" else (5, 10)  # Radius for sphere, (radius, height) for cylinder
 
 
-trajectories = simulate_neutron_trajectories(boundary_type, size,1000)
+trajectories = simulate_neutron_trajectories(boundary_type, size, 10000)
 plot_trajectories(trajectories, boundary_type, size)
