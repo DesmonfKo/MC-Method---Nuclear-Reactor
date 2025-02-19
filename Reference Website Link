@@ -1,8 +1,9 @@
 Put here any useful website links with their description as well:
 1)VS Code User Guide: https://code.visualstudio.com/docs/getstarted/getting-started
 
-2)
+2)'Proper' Nuclear Reactor Simulation Reference Website: https://docs.openmc.org/en/stable/methods/random_numbers.html
 
-3)
+3)Numpy documentation for drawing sample from exponential distribution(May not be useful): https://numpy.org/doc/2.1/reference/random/generated/numpy.random.exponential.html
 
+4)
 ...
