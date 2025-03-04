@@ -158,33 +158,4 @@ plot_free_path_lengths_histogram(step_lengths)
 # Plot neutron trajectories (interactive)
 plot_trajectories(trajectories, boundary_type, size)
 
-'''
-Explanation of Changes
-1. Random Position Generation
-Sphere: Replaced rejection sampling with a direct method using spherical coordinates. The radius r is scaled by u**(1./3) to ensure uniform distribution across the sphere’s volume.
-Cylinder: Used polar coordinates for the circular base (r = radius * sqrt(u) for uniformity) and uniform z along the height, avoiding rejection sampling.
-Benefit: Eliminates the overhead of generating and rejecting points, slightly reducing computation time.
-2. Trajectory Simulation
-Selective Storage: Added a plot_sample_size parameter (default 20) and used random.sample to select a subset of neutron indices. Only these neutrons have their full trajectories stored in trajectories.
-Step Lengths: Collected d directly in step_lengths for all neutrons during simulation, as d is the exact step length moved in each iteration.
-Benefit: Reduces memory usage significantly. For example, with 500 neutrons and 1000 steps per trajectory, the original code stores 500 × 1000 × 3 × 8 bytes ≈ 12 MB. The optimized version stores only 20 trajectories (≈ 0.48 MB) plus a list of scalars for step_lengths.
-3. Plotting Adjustments
-Trajectories: The plot_trajectories function now uses the sampled trajectories directly, with downsampling (traj[::10]) preserved for plotting speed.
-Histogram: Updated plot_free_path_lengths_histogram to use step_lengths directly, removing the need to compute norms. All step lengths are used, improving statistical accuracy over the original downsampled approach.
-Benefit: Avoids redundant computations and leverages pre-collected data.
-Performance Improvements
-Memory Efficiency: By storing full trajectories only for a small sample (e.g., 20 out of 500 neutrons), memory usage drops from potentially hundreds of MB (for large n_neutrons) to a few MB, making the code scalable.
-Computational Speed:
-Direct position generation removes rejection loops, offering a minor speed boost.
-Eliminating np.linalg.norm calculations for step lengths saves computation, though this is small compared to the simulation loop itself.
-Simulation time remains similar (around 2 seconds for 500 neutrons), as the core loop structure is unchanged, but memory savings enable handling larger n_neutrons without slowdowns due to memory swapping.
-Additional Considerations
-Parallelization: For very large n_neutrons (e.g., 100,000), parallelizing the simulation across CPU cores using multiprocessing could further reduce runtime, as each neutron’s trajectory is independent. However, this is unnecessary for the current scale.
-Plotting: The 3D plotting with Matplotlib is reasonable for 20 downsampled trajectories. For larger visualizations, consider faster libraries like Plotly, though this adds complexity.
-Conclusion
-The optimized code reduces computational burden primarily through memory efficiency while maintaining or slightly improving runtime. It achieves this by:
-Storing full trajectories only for a plotting sample.
-Collecting step lengths directly during simulation.
-Using efficient, rejection-free random position generation.
-These changes make the code more scalable and resource-efficient without altering its core functionality or output quality. You can adjust plot_sample_size or n_neutrons as needed for your specific use case.
-'''
+
