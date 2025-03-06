@@ -383,64 +383,15 @@ def random_position_cylinder(radius=1, height=1):
 # ========================
 # Neutron Simulation Core
 # ========================
-def simulate_neutron(geometry='sphere', size=1, 
-                    mean_free_path=1, absorption_prob=0.5):
+
+
+def simulate_neutron_trajectory(geometry='sphere', size=1,
+                               mean_free_path=1, absorption_prob=0.5):
     if geometry == 'sphere':
         radius = size
         pos = random_position_sphere_optimized(radius)
     elif geometry == 'cylinder':
-        radius,height = size
-        pos = random_position_cylinder(radius, height)
-    
-    while True:
-        direction = rand.randn(3)
-        direction /= norm(direction)
-        step_length = rand.exponential(mean_free_path)
-        
-        # Calculate maximum allowed step
-        if geometry == 'sphere':
-            a = np.dot(direction, direction)
-            b = 2 * np.dot(pos, direction)
-            c = np.dot(pos, pos) - radius**2
-            discriminant = b**2 - 4*a*c
-            if discriminant < 0:
-                t_max = np.inf
-            else:
-                t_max = min([t for t in [(-b + np.sqrt(discriminant))/(2*a),
-                                        (-b - np.sqrt(discriminant))/(2*a)] if t > 0])
-        elif geometry == 'cylinder':
-            # Radial collision
-            x, y, z = pos
-            dx, dy, dz = direction
-            a_rad = dx**2 + dy**2
-            b_rad = 2*(x*dx + y*dy)
-            c_rad = x**2 + y**2 - radius**2
-            disc_rad = b_rad**2 - 4*a_rad*c_rad
-            t_rad = min([t for t in [(-b_rad + np.sqrt(disc_rad))/(2*a_rad),
-                                   (-b_rad - np.sqrt(disc_rad))/(2*a_rad)] if t > 0]) if disc_rad >=0 else np.inf
-            
-            # Axial collision
-            if dz == 0:
-                t_axial = np.inf if abs(z) <= height/2 else 0
-            else:
-                t_upper = (height/2 - z)/dz
-                t_lower = (-height/2 - z)/dz
-                t_axial = min([t for t in [t_upper, t_lower] if t > 0])
-            
-            t_max = min(t_rad, t_axial)
-        
-        if step_length > t_max:
-            return (False, True)
-        else:
-            pos += direction * step_length
-            if rand.uniform() < absorption_prob:
-                return (True, False)
-
-def simulate_neutron_trajectory(geometry='sphere', radius=1, height=1,
-                               mean_free_path=1, absorption_prob=0.5):
-    if geometry == 'sphere':
-        pos = random_position_sphere_optimized(radius)
-    elif geometry == 'cylinder':
+        radius, height = size
         pos = random_position_cylinder(radius, height)
     
     trajectory = [pos.copy()]
@@ -607,8 +558,8 @@ def simulate_generation(n_neutrons, geometry='sphere', size=1, mean_free_path=1,
     leaked = 0
 
     for _ in range(n_neutrons):
-        a, l = simulate_neutron(geometry=geometry, size=1,
-                                mean_free_path=mean_free_path, absorption_prob=absorption_prob)
+        a, l = simulate_neutron_trajectory(geometry, size,
+                                mean_free_path, absorption_prob)
         if a:
             absorbed += 1
         elif l:
