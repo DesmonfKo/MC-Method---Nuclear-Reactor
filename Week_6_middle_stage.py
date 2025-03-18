@@ -1,4 +1,4 @@
-## New Extension, Week 6 middle stage ##
+## New Extension-Extension, Week 6 middle stagee ##
 #####################################
 # PATCH 1 of N
 #####################################
@@ -76,7 +76,7 @@ def validate_neutron_model(input_str):
 def validate_moderator(input_str):
     """
     We will allow user to type H2O, D2O, or Graphite in any case (upper/lower).
-    We'll rename them internally (H2O->'water', D2O->'heavywater'), but just check membership ignoring case.
+    We'll rename them internally, but just check membership ignoring case.
     """
     val = input_str.strip().lower()
     return val in ['h2o','d2o','graphite']
@@ -132,35 +132,42 @@ def random_position_sphere_optimized(radius=1):
 class ReactorMaterial:
     """
     Container for nuclear data for one isotope (or compound).
-    All cross sections in barns are stored but also converted to SI (m^2).
+    We now keep TWO sets of variables:
+      - .density_gcc, .molar_mass_gmol: raw user units (g/cc, g/mol)
+      - .density, .molar_mass: (kg/m^3, kg/mol) for old calculations
+    Also keep cross sections in barns and in SI (m^2).
     """
     def __init__(self, name, mat_type, density, molar_mass, 
                  sigma_s_b, sigma_a_b, sigma_f_b=0.0,
                  nu=0.0, xi=0.0):
         self.name = name
         self.mat_type = mat_type  # 'fuel' or 'moderator'
-        # Convert from g/cc to kg/m^3 for density
-        self.density = density * 1e3
-        # Convert from g/mol to kg/mol for molar_mass
-        self.molar_mass = molar_mass * 1e-3
         
+        # Store original user units (assuming density is g/cc, molar_mass is g/mol)
+        self.density_gcc = density
+        self.molar_mass_gmol = molar_mass
+
+        # Also store SI conversions for the old fission formula or number_density usage
+        self.density = density * 1e3     # g/cc -> kg/m^3
+        self.molar_mass = molar_mass*1e-3  # g/mol -> kg/mol
+
+        # Cross sections in barns
         self.sigma_s_b = sigma_s_b  # scattering (barn)
         self.sigma_a_b = sigma_a_b  # absorption (barn)
         self.sigma_f_b = sigma_f_b  # fission (barn)
         
-        # Convert barns to m^2 (1 barn = 1e-28 m^2)
+        # Also in SI (m^2) if needed
         self.sigma_s = sigma_s_b * 1e-28
         self.sigma_a = sigma_a_b * 1e-28
         self.sigma_f = sigma_f_b * 1e-28
         
-        self.nu = nu  # average neutrons per fission for that isotope
+        self.nu = nu  # average neutrons/fission for that isotope
         self.xi = xi  # average log-energy decrement (only for moderators)
 
     @property
     def number_density(self):
         """
-        number_density = (density / molar_mass) * NA
-        Units: [atoms/m^3].
+        Old code uses: number_density = (density_kg_m3 / molar_mass_kg_mol)*NA
         """
         return (self.density / self.molar_mass) * NA
 
@@ -241,31 +248,23 @@ def get_wikipedia_materials(neutron_model='thermal'):
 
 
 ########################################
-# ReactorMixture with Revised Σ's
+# ReactorMixture
 ########################################
 class ReactorMixture:
     """
-    We define 3 isotopes in the mixture: U-235, U-238, and a moderator (e.g. H2O).
-    Let a(U-235) = fraction_U235
-        a(U-238) = (1 - fraction_U235)
-        a(moderator) = R_mtf  (ratio of moderator atoms to total fuel atoms)
+    We now compute macroscopic scattering & absorption from the new formula:
+      B = aU235 + aU238 + R_mtf  (where aU238 = 1 - aU235),
+      Σ_s = convFactor * [ (aU235/B)*(rho235_gcc/M235_gmol)*σ_s_b(U235) + ...
+                           + (R_mtf/B)*(rhoMod_gcc/Mmod_gmol)*σ_s_b(mod) ]
+    Similarly for Σ_a.  convFactor = 10^6 * NA * 10^-28 = about 60.22 => from (g/cc->g/cm^3) plus barns->m^2, etc.
 
-    Then the number density of each species i is:
-        N_i = a_i * (density_i / molar_mass_i) * NA   [where a_i are relative atomic fractions]
-
-    The macroscopic cross section for process j (scattering, absorption, fission) is:
-        Σ_j = Σ_i [ N_i * σ_{i,j} ],
-    where i runs over {U235, U238, moderator}.  But for fission, only the fuel contributes.
-
-    Probability of fission = Σ_{f, fuel} / Σ_{a, total}
-    Probability of absorption = Σ_{a, total} / [Σ_{a, total} + Σ_{s, total}]
-    Probability of scattering = Σ_{s, total} / [Σ_{a, total} + Σ_{s, total}]
+    Fission remains as in the old code (using .number_density * .sigma_f).
     """
     def __init__(self, fraction_U235, moderator, R_mtf, u235_material, u238_material):
         """
         fraction_U235 : fraction (0 to 1) of the fuel that is U-235 by atom fraction
         moderator     : a ReactorMaterial object (moderator)
-        R_mtf         : ratio of (moderator atoms) to (total fuel atoms), can be >= 0
+        R_mtf         : ratio of (moderator atoms) to (total fuel atoms), >= 0
         """
         self.fraction_U235 = fraction_U235
         self.moderator = moderator
@@ -273,36 +272,56 @@ class ReactorMixture:
         self.u235 = u235_material
         self.u238 = u238_material
 
-        # Precompute number densities:
-        self.N_u235 = self.fraction_U235 * self.u235.number_density
-        self.N_u238 = (1 - self.fraction_U235) * self.u238.number_density
-        self.N_mod  = self.R_mtf * (self.N_u235 + self.N_u238)
-
     @property
     def macroscopic_scattering(self):
-        return ( self.N_u235 * self.u235.sigma_s 
-               + self.N_u238 * self.u238.sigma_s
-               + self.N_mod  * self.moderator.sigma_s
-               )
+        # B = aU235 + aU238 + R_mtf = 1 + R_mtf
+        aU235 = self.fraction_U235
+        aU238 = 1.0 - aU235
+        B = aU235 + aU238 + self.R_mtf  # should be 1 + R_mtf
+
+        # conversion factor for final result in m^-1
+        conv = 1.0e6 * NA * 1.0e-28   # ~ 60.22
+
+        # each term => (fraction / B) * (rho [g/cc]/ M [g/mol]) * sigma_s_b
+        part_u235 = (aU235/B)*(self.u235.density_gcc/self.u235.molar_mass_gmol)*self.u235.sigma_s_b
+        part_u238 = (aU238/B)*(self.u238.density_gcc/self.u238.molar_mass_gmol)*self.u238.sigma_s_b
+        part_mod  = (self.R_mtf/B)*(self.moderator.density_gcc/self.moderator.molar_mass_gmol)*self.moderator.sigma_s_b
+        return conv*(part_u235 + part_u238 + part_mod)
 
     @property
     def macroscopic_absorption(self):
-        return ( self.N_u235 * self.u235.sigma_a
-               + self.N_u238 * self.u238.sigma_a
-               + self.N_mod  * self.moderator.sigma_a
-               )
+        # same formula as scattering, but with absorption cross sections
+        aU235 = self.fraction_U235
+        aU238 = 1.0 - aU235
+        B = aU235 + aU238 + self.R_mtf
+        conv = 1.0e6 * NA * 1.0e-28
+
+        part_u235 = (aU235/B)*(self.u235.density_gcc/self.u235.molar_mass_gmol)*self.u235.sigma_a_b
+        part_u238 = (aU238/B)*(self.u238.density_gcc/self.u238.molar_mass_gmol)*self.u238.sigma_a_b
+        part_mod  = (self.R_mtf/B)*(self.moderator.density_gcc/self.moderator.molar_mass_gmol)*self.moderator.sigma_a_b
+        return conv*(part_u235 + part_u238 + part_mod)
 
     @property
     def macroscopic_fission(self):
-        # Only fuel contributes to fission cross section
-        return ( self.N_u235 * self.u235.sigma_f
-               + self.N_u238 * self.u238.sigma_f
-               )
+        """
+        Now also updated to the "new" formula from your image:
+        Σ_f = [ (aU235/B)*(rho235_gcc/m235_gmol)*σ_f,b(U235)
+               +(aU238/B)*(rho238_gcc/m238_gmol)*σ_f,b(U238)
+              ] * 1e6 * NA * 1e-28
+        """
+        aU235 = self.fraction_U235
+        aU238 = 1.0 - aU235
+        B     = aU235 + aU238 + self.R_mtf
+        conv  = 1.0e6 * NA * 1.0e-28
+
+        part_u235 = (aU235/B)*(self.u235.density_gcc/self.u235.molar_mass_gmol)*self.u235.sigma_f_b
+        part_u238 = (aU238/B)*(self.u238.density_gcc/self.u238.molar_mass_gmol)*self.u238.sigma_f_b
+        return conv*(part_u235 + part_u238)
 
     @property
     def fission_probability(self):
         """
-        P_fission = Σ_f,fuel / Σ_a,total, if Σ_a>0; else 0.
+        P_fission = Σ_f / Σ_a (in SI units).
         """
         sigma_f = self.macroscopic_fission
         sigma_a = self.macroscopic_absorption
@@ -316,24 +335,20 @@ class ReactorMixture:
         """
         P_scatter = Σ_s / (Σ_s + Σ_a).
         """
-        sigma_s = self.macroscopic_scattering
-        sigma_a = self.macroscopic_absorption
-        denom = sigma_s + sigma_a
-        if denom <= 1e-30:
-            return 0.0
-        return sigma_s / denom
+        s = self.macroscopic_scattering
+        a = self.macroscopic_absorption
+        denom = s + a
+        return s/denom if denom>1e-30 else 0.0
 
     @property
     def absorption_probability(self):
         """
         P_abs = Σ_a / (Σ_s + Σ_a).
         """
-        sigma_s = self.macroscopic_scattering
-        sigma_a = self.macroscopic_absorption
-        denom = sigma_s + sigma_a
-        if denom <= 1e-30:
-            return 0.0
-        return sigma_a / denom
+        s = self.macroscopic_scattering
+        a = self.macroscopic_absorption
+        denom = s + a
+        return a/denom if denom>1e-30 else 0.0
 
 #####################################
 # PATCH 3 of N
@@ -341,14 +356,14 @@ class ReactorMixture:
 
 def distance_to_collision(mixture):
     """
-    Sample a random distance to collision with mean free path = 1 / (Σ_s + Σ_a).
-    Exponential distribution: d = -ln(rand()) / Σ_tot
+    Sample a random distance to collision with mean free path = 1 / Σ_tot.
+    Σ_tot = Σ_s + Σ_a (in m^-1).
     """
     sigma_s = mixture.macroscopic_scattering
     sigma_a = mixture.macroscopic_absorption
     sigma_tot = sigma_s + sigma_a
     if sigma_tot <= 1e-30:
-        return 1e10  # effectively no collisions
+        return 1e10
     return -np.log(rand.rand()) / sigma_tot
 
 
@@ -363,24 +378,18 @@ def point_is_inside_sphere(point, radius):
 def point_is_inside_cylinder(point, radius, height):
     """
     Check if the 3D point is inside cylinder with 'radius' and 'height'.
-    Cylinder axis is along z from z=-height/2 to z=height/2.
+    Cylinder axis is z in [-height/2, height/2].
     """
     x, y, z = point
     r2 = x*x + y*y
-    return (r2 <= radius**2) and (abs(z) <= (height/2))
+    return (r2 <= radius**2) and (abs(z) <= height/2)
 
 
 def radial_distance_sphere(point):
-    """
-    Return distance from origin.
-    """
     return np.sqrt(point[0]**2 + point[1]**2 + point[2]**2)
 
 
 def radial_distance_cylinder(point):
-    """
-    Return radial distance from cylinder axis (z-axis).
-    """
     x, y, z = point
     return np.sqrt(x*x + y*y)
 
@@ -403,20 +412,9 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
     """
     Simulate the random walk of N0 neutrons for the 1st generation.
     They start uniformly distributed inside the chosen geometry.
-    Track collisions (scatter/absorb/fission) until each neutron
-    either is absorbed or leaks.
-
-    Returns a dictionary with:
-       'absorbed_positions': array of final absorption points
-       'absorbed_count': int
-       'leak_count': int
-       'bin_edges': array
-       'bin_centers': array
-       'scatter_density': array
-       'absorb_density': array
-       'fission_density': array
+    Track collisions (scatter/absorb/fission) until each neutron is
+    absorbed or leaks.
     """
-    # Probabilities from mixture
     P_scat = mixture.scattering_probability
     P_abs  = mixture.absorption_probability
     P_fis  = mixture.fission_probability
@@ -427,7 +425,6 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
         R = float(size[0])
         H = float(size[1])
 
-    # Initialize positions
     neutron_positions = np.zeros((N0, 3))
     for i in range(N0):
         if geometry=='sphere':
@@ -440,31 +437,30 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
     leak_count = 0
 
     scatter_r_vals = []
-    absorb_r_vals = []
+    absorb_r_vals  = []
     fission_r_vals = []
 
     active_indices = np.where(is_active)[0]
-    while len(active_indices) > 0:
+    while len(active_indices)>0:
         for idx in active_indices:
             pos = neutron_positions[idx]
             d_coll = distance_to_collision(mixture)
-            dirn = random_scatter_direction()
+            dirn   = random_scatter_direction()
             new_pos = pos + d_coll*dirn
 
             # check leak
             if geometry=='sphere':
                 if not point_is_inside_sphere(new_pos, R):
                     is_active[idx] = False
-                    leak_count += 1
+                    leak_count+=1
                     continue
             else:
                 if not point_is_inside_cylinder(new_pos, R, H):
                     is_active[idx] = False
-                    leak_count += 1
+                    leak_count+=1
                     continue
 
-            # collision occurs
-            # decide scatter vs absorption
+            # collision
             rand_event = rand.rand()
             if rand_event < P_scat:
                 # scatter
@@ -472,7 +468,7 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
                     scatter_r_vals.append(radial_distance_sphere(new_pos))
                 else:
                     scatter_r_vals.append(radial_distance_cylinder(new_pos))
-                neutron_positions[idx] = new_pos  # stays active
+                neutron_positions[idx] = new_pos
             else:
                 # absorbed
                 if geometry=='sphere':
@@ -480,32 +476,28 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
                 else:
                     r_abs = radial_distance_cylinder(new_pos)
                 absorb_r_vals.append(r_abs)
-
-                # check if fission
+                # check fission
                 if rand.rand() < P_fis:
                     fission_r_vals.append(r_abs)
-
                 absorbed_positions.append(new_pos)
                 is_active[idx] = False
 
         active_indices = np.where(is_active)[0]
 
     absorbed_count = len(absorbed_positions)
-
     # radial binning
-    bin_edges = np.linspace(0, R, bins+1)
-    scatter_hist, _ = np.histogram(scatter_r_vals, bins=bin_edges)
-    absorb_hist, _  = np.histogram(absorb_r_vals,  bins=bin_edges)
-    fission_hist, _ = np.histogram(fission_r_vals, bins=bin_edges)
-    bin_centers = 0.5*(bin_edges[:-1] + bin_edges[1:])
+    bins_r = np.linspace(0, R, bins+1)
+    scatter_hist, _ = np.histogram(scatter_r_vals, bins=bins_r)
+    absorb_hist,  _ = np.histogram(absorb_r_vals,  bins=bins_r)
+    fission_hist, _ = np.histogram(fission_r_vals, bins=bins_r)
+    bin_centers = 0.5*(bins_r[:-1] + bins_r[1:])
 
     if geometry=='sphere':
-        # volume of shell [r_n, r_{n+1}] = 4π/3 (r_{n+1}^3 - r_n^3)
-        shell_volumes = (4./3.)*np.pi*(bin_edges[1:]**3 - bin_edges[:-1]**3)
+        shell_volumes = (4./3.)*np.pi*(bins_r[1:]**3 - bins_r[:-1]**3)
     else:
-        # cylinder ring volumes
-        ring_areas = np.pi*(bin_edges[1:]**2 - bin_edges[:-1]**2)
-        shell_volumes = ring_areas * H
+        ring_areas    = np.pi*(bins_r[1:]**2 - bins_r[:-1]**2)
+        H = float(size[1])
+        shell_volumes = ring_areas*H
 
     scatter_density = scatter_hist / shell_volumes
     absorb_density  = absorb_hist  / shell_volumes
@@ -515,7 +507,7 @@ def simulate_first_generation(mixture, geometry, size, N0, average_neutrons_per_
         'absorbed_positions': np.array(absorbed_positions),
         'absorbed_count': absorbed_count,
         'leak_count': leak_count,
-        'bin_edges': bin_edges,
+        'bin_edges': bins_r,
         'bin_centers': bin_centers,
         'scatter_density': scatter_density,
         'absorb_density': absorb_density,
@@ -555,21 +547,19 @@ def plot_first_generation_hist(results_dict, geometry, N0):
 def compute_k_factor_and_uncertainty(num_absorbed, num_initial, fission_probability, avg_neutrons_per_fission):
     """
     k = (#absorbed / #initial) * fission_probability * avg_neutrons_per_fission
-    Uncertainty from binomial stdev with p = fission_probability among the 'absorbed' events.
+    Uncertainty from binomial stdev with p = fission_probability among 'absorbed'.
     """
     if num_initial <= 0:
         return (0.0, 0.0)
-    k = (num_absorbed / num_initial) * fission_probability * avg_neutrons_per_fission
+    k = (num_absorbed / num_initial)*fission_probability*avg_neutrons_per_fission
 
-    # binomial stdev in # of fissions among absorbed => sqrt(N*p(1-p))
     N = num_absorbed
     p = fission_probability
     stdev_fissions = 0.0
-    if N>0 and p>=0 and p<=1:
-        stdev_fissions = np.sqrt(N * p * (1-p))
-    # fraction uncertainty => ( stdev_fissions / N ) => multiply by (avg_nu / num_initial)
+    if N>0 and 0<=p<=1:
+        stdev_fissions = np.sqrt(N*p*(1-p))
     if N>0:
-        dk = (avg_neutrons_per_fission / float(num_initial)) * stdev_fissions
+        dk = (avg_neutrons_per_fission / float(num_initial))*stdev_fissions
     else:
         dk = 0.0
     return (k, dk)
@@ -578,9 +568,7 @@ def compute_k_factor_and_uncertainty(num_absorbed, num_initial, fission_probabil
 def simulate_generation(mixture, geometry, size, initial_positions):
     """
     A simpler random-walk for subsequent generations.
-    We start with 'initial_positions' of absorbed neutrons from previous gen.
-    Track until absorbed or leaked.  We do not produce new fission neutrons
-    mid-simulation; that is accounted for only in the generational k-factor formula.
+    Start with 'initial_positions' for all neutrons, track until absorbed or leaked.
     """
     N = initial_positions.shape[0]
     is_active = np.ones(N, dtype=bool)
@@ -594,7 +582,7 @@ def simulate_generation(mixture, geometry, size, initial_positions):
         H = float(size[1])
 
     P_scat = mixture.scattering_probability
-    P_fis  = mixture.fission_probability  # not used directly except to define what's "fission" among absorption?
+    P_fis  = mixture.fission_probability
 
     while True:
         active_indices = np.where(is_active)[0]
@@ -604,25 +592,26 @@ def simulate_generation(mixture, geometry, size, initial_positions):
         for idx in active_indices:
             pos = initial_positions[idx]
             d_coll = distance_to_collision(mixture)
-            dirn = random_scatter_direction()
+            dirn   = random_scatter_direction()
             new_pos = pos + d_coll*dirn
 
-            # leak?
+            # check leak
             if geometry=='sphere':
                 if not point_is_inside_sphere(new_pos, R):
                     is_active[idx] = False
-                    leak_count += 1
+                    leak_count+=1
                     continue
             else:
                 if not point_is_inside_cylinder(new_pos, R, H):
                     is_active[idx] = False
-                    leak_count += 1
+                    leak_count+=1
                     continue
 
-            # collision => scatter or absorb
+            # collision
             rand_event = rand.rand()
             if rand_event < P_scat:
-                initial_positions[idx] = new_pos  # scattered => remain active
+                # scatter => remain active
+                initial_positions[idx] = new_pos
             else:
                 # absorbed => done
                 absorbed_positions.append(new_pos)
@@ -705,7 +694,7 @@ def main():
         "Must be a number between 0 and 100"
     ))/100.0
 
-    # R_mtf >= 0
+    # R_mtf >=0
     R_mtf = float(get_valid_input(
         "Moderator-to-fuel ratio, R_mtf (>=0): ",
         lambda x: validate_float(x, 0.0),
@@ -716,8 +705,8 @@ def main():
     moderator_obj = MODERATORS_DICT[mod_key]
     mixture = ReactorMixture(u235_percent, moderator_obj, R_mtf, u235_mat, u238_mat)
 
-    # (2) Print out Σ_s, Σ_a, Σ_f up to 8 decimal places in SI units (m^-1)
-    print("\nMacroscopic Cross Sections (SI units, 1/m):")
+    # Print out Σ_s, Σ_a, Σ_f (m^-1) with 8 decimals
+    print("\nMacroscopic Cross Sections (SI units, m^-1):")
     print(f"  Σ_s (scattering) = {mixture.macroscopic_scattering:.8e}")
     print(f"  Σ_a (absorption) = {mixture.macroscopic_absorption:.8e}")
     print(f"  Σ_f (fission)    = {mixture.macroscopic_fission:.8e}")
@@ -730,7 +719,7 @@ def main():
     )
     N0 = int(N0_str)
 
-    # Create an empty array for positions (size N0,3)
+    # Create an empty positions array of shape (N0,3)
     initial_positions = np.zeros((N0,3))
 
     # Simulate 1st generation
@@ -743,7 +732,7 @@ def main():
         bins=20
     )
     absorbed_count_1st = results_1st['absorbed_count']
-    leak_count_1st = results_1st['leak_count']
+    leak_count_1st     = results_1st['leak_count']
 
     # compute k1
     (k1, dk1) = compute_k_factor_and_uncertainty(
@@ -753,10 +742,10 @@ def main():
         avg_neutrons_per_fission=2.42
     )
 
-    # plot the collisions histogram for 1st generation
+    # plot collisions for 1st generation
     plot_first_generation_hist(results_1st, geometry, N0)
 
-    # Display scattering, absorption, fission probabilities (6 dp, as before)
+    # Print scattering, absorption, fission probabilities (6 dp)
     print("\n=== Results for 1st Generation ===")
     print(f"Scattering Probability = {mixture.scattering_probability:.6f}")
     print(f"Absorption Probability = {mixture.absorption_probability:.6f}")
@@ -765,11 +754,10 @@ def main():
     print(f"Number leaked         = {leak_count_1st}")
     print(f"k1 = {k1:.6f} ± {dk1:.6f}")
 
-    # store k in a list
-    k_values = []
-    k_values.append((k1, dk1))
+    # store k
+    k_values = [(k1, dk1)]
 
-    # ask how many generations
+    # how many generations
     S_str = get_valid_input(
         "How many generations of simulation do you want to run? ",
         validate_positive_integer,
@@ -777,19 +765,17 @@ def main():
     )
     S = int(S_str)
 
-    # next generation initial positions = absorbed locations from 1st gen
+    # next generation initial = absorbed from 1st
     prev_absorbed_positions = results_1st['absorbed_positions']
 
-    # run generation 2..S
     for gen_index in range(2, S+1):
         Nprev = prev_absorbed_positions.shape[0]
         if Nprev==0:
             print(f"\nGeneration {gen_index}: No absorbed neutrons => no new neutrons. Stopping.")
-            # store a zero k
-            k_values.append((0.0, 0.0))
+            k_values.append((0.0,0.0))
             break
 
-        # run a new generation
+        # simulate new generation
         results_this_gen = simulate_generation(
             mixture=mixture,
             geometry=geometry,
@@ -797,10 +783,9 @@ def main():
             initial_positions=prev_absorbed_positions
         )
         num_abs = results_this_gen['absorbed_count']
-        num_leak = results_this_gen['leak_count']
+        num_leak= results_this_gen['leak_count']
         prev_absorbed_positions = results_this_gen['absorbed_positions']
 
-        # compute k
         (kgen, dkgen) = compute_k_factor_and_uncertainty(
             num_absorbed=num_abs,
             num_initial=Nprev,
@@ -812,12 +797,12 @@ def main():
 
     # plot k vs generation
     gens_list = np.arange(1, len(k_values)+1)
-    k_arr = np.array([kv[0] for kv in k_values])
+    k_arr  = np.array([kv[0] for kv in k_values])
     dk_arr = np.array([kv[1] for kv in k_values])
 
     plt.figure()
-    plt.errorbar(gens_list, k_arr, yerr=dk_arr, fmt='o-', label='k-factor with uncertainty')
-    plt.axhline(y=1.0, color='r', linestyle='--', label='k = 1.0')
+    plt.errorbar(gens_list, k_arr, yerr=dk_arr, fmt='o-', label='k-factor w/ uncertainty')
+    plt.axhline(y=1.0, color='r', linestyle='--', label='k=1.0')
     plt.xlabel("Generation #")
     plt.ylabel("k-factor")
     plt.title(f"k-Factor Evolution, Starting with N0 = {N0}")
@@ -825,21 +810,21 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # if S>=20, average k from gen=11..20
+    # If S>=20, average k from gen=11..20
     if len(k_values)>=20:
-        k_sub = k_arr[10:20]   # 11th..20th
+        k_sub  = k_arr[10:20]  # gen 11..20
         dk_sub = dk_arr[10:20]
-        mask = (dk_sub>1e-12)
+        mask   = (dk_sub>1e-12)
         if not np.any(mask):
-            print("Cannot compute weighted average k for 11th..20th: all uncertainties zero.")
+            print("Cannot compute weighted average k for 11..20: all uncertainties zero.")
         else:
             w = 1.0/(dk_sub[mask]**2)
-            k_avg = np.sum(k_sub[mask]*w)/np.sum(w)
-            dk_avg = np.sqrt(1.0 / np.sum(w))
+            k_avg  = np.sum(k_sub[mask]*w)/np.sum(w)
+            dk_avg = np.sqrt(1.0/np.sum(w))
             print(f"\nAverage k between 11th and 20th generation = {k_avg:.6f} ± {dk_avg:.6f}")
 
     print("\nSimulation completed. Exiting.")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
